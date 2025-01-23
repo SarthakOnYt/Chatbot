@@ -1,114 +1,110 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_community.embeddings import SentenceTransformerEmbeddings
+import json
+from functools import lru_cache
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 
-# Load the model and tokenizer locally
-def load_model():
-    model_path = "./Mistral-7B"  # Path to the cloned Git repository
+# Context setup for bot
+Context = {
+    "Name": "", # Name of the Ai model
+    "Age": "You are an AI and hence do not have an age", # Age of the AI
+    "Role": "",# Role of the AI
+    "Allowed": ["Family friendly content","Jokes"],
+    "NotAllowed": ["Advertising", "Spamming", "Hate speech"]
+}
 
+# Chat History Management
+def load_history():
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            device_map="auto",  # Automatically chooses the best device
-            offload_folder="./offload",  # Saves offloaded weights to disk
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32  # Use float16 on GPU for speed
-        )
+        with open("chat_history.json", "r") as ri:
+            return json.load(ri)
+    except FileNotFoundError:
+        return []  # Return an empty list if no file is found
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        print("✅ Model and tokenizer loaded successfully!")
+def save_history(chat_history):
+    with open("chat_history.json", "w") as wi:
+        json.dump(chat_history, wi, indent=4)
 
-        return model, tokenizer
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        exit()
+# Initialize chat history
+chat_history = load_history()
 
-# Initialize ChromaDB for storing conversation history
-def init_chroma():
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    db = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-    return db
+formatted_chat_history=""
+for a in chat_history:
+    formatted_chat_history += f"Role: {a['role']}\nContent: {a['content']}\n\n"
 
-# Function to store conversations in ChromaDB
-def store_memory(db, user_input, ai_response):
-    try:
-        db.add_texts([f"User: {user_input}\nAI: {ai_response}"])
-        db.persist()
-        print("✅ Conversation stored in memory.")
-    except Exception as e:
-        print(f"❌ Error storing conversation: {e}")
+print("Chat History Loaded")
+#----
+model_path = "./Mistral-7B"  # Path to Model
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    device_map="auto",  # Automatically chooses the best device
+    offload_folder="./offload",  # Saves offloaded weights to disk
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32  # Use float16 on GPU for speed
+)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-# Retrieve memory for context
-def retrieve_memory(db, query, k=3):
-    try:
-        results = db.similarity_search(query, k=k)
-        return [result.page_content for result in results]
-    except Exception as e:
-        print(f"❌ Error retrieving memory: {e}")
-        return []
+print("Model and tokenizer loaded successfully!")
 
-# Generate AI response using the model
-def generate_response(model, tokenizer, prompt):
-    # Tokenize the input prompt with attention mask
-    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
-    inputs["attention_mask"] = inputs["input_ids"].ne(tokenizer.pad_token_id).long()
 
-    # Ensure to place inputs on the right device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    inputs = {key: val.to(device) for key, val in inputs.items()}
+#Use pipeline is device is of mid-high end
+"""
+text_generation_pipeline = pipeline(
+    "text-generation",
+    model=model,
+    #device=0 if torch.cuda.is_available() else -1,
+    torch_dtype=torch.float16,
+    tokenizer=tokenizer,
+    pad_token_id=tokenizer.eos_token_id
+)"""
 
-    # Generate the model's response
-    with torch.no_grad():
-        outputs = model.generate(
-            inputs["input_ids"], 
-            attention_mask=inputs["attention_mask"],
-            max_length=100,  # You can adjust this depending on desired response length
-            num_return_sequences=1,
-            pad_token_id=tokenizer.eos_token_id  # Handle padding properly
-        )
-
-    # Decode and return the response
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # Ensure we only return the last generated portion (the AI's response)
-    response = response.split("AI:")[-1].strip()
+#Remove the tag if you want to use caching for generated responses
+#@lru_cache(maxsize=1000) 
+def generate_response(Text_input):
+    #model = text_generation_pipeline
     
-    return response
+    Full_input = (
+    f"Context: {Context}\n"
+    f"Chat History:\n{formatted_chat_history}\n"
+    f"User: {Text_input}\n")
 
-# Main conversation loop
-def ai_vtuber():
-    model, tokenizer = load_model()
-    db = init_chroma()
-    conversation_history = []  # List to store the entire conversation
+    # Tokenize input with padding
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    inputs = tokenizer(
+        Full_input, 
+        return_tensors="pt", 
+        padding=True,   # Adds padding to match length
+        truncation=True,  # Truncates if too long
+        max_length=200  # Set max length to avoid unexpected behaviors
+    )
+    input_ids = inputs["input_ids"].to(model.device)
+    attention = inputs["attention_mask"].to(model.device)
 
+    response = model.generate(
+        input_ids,
+        max_new_tokens=50,
+        temperature=0.8,
+        top_p=0.9,
+        do_sample=True,
+        num_return_sequences=1,
+        attention_mask=attention,
+        pad_token_id=tokenizer.eos_token_id
+        )
+    response_text = tokenizer.decode(response[0], skip_special_tokens=True)
+    
+    chat_history.append({"role": "user", "content": Text_input})
+    chat_history.append({"role": "Ai", "content": response_text})
+    save_history(chat_history)
+
+    return response_text
+
+# Chat interaction loop
+def chat():
     while True:
-        try:
-            user_input = input("You: ").strip()
-            if user_input.lower() == "exit":
-                break
-
-            # Add the user's input to the conversation history
-            conversation_history.append(f"User: {user_input}")
-
-            # Construct the full conversation context
-            conversation_context = "\n".join(conversation_history)  # All prior conversation history
-            prompt = conversation_context + "\nAI:"  # Adding "AI:" for the model to respond to
-
-            # Generate AI response
-            ai_response = generate_response(model, tokenizer, prompt)
-            print(f"AI: {ai_response}")
-
-            # Store the conversation in memory (both user and AI response)
-            store_memory(db, user_input, ai_response)
-
-            # Add the AI's response to the conversation history
-            conversation_history.append(f"AI: {ai_response}")
-
-        except KeyboardInterrupt:
-            print("\n👋 Exiting AI VTuber. Goodbye!")
+        Text_input = input("User: ")
+        if Text_input.lower() == 'q':
             break
+        response = generate_response(Text_input)
+        print(f"Josh: {response}")
 
-# Start the chatbot
-if __name__ == "__main__":
-    ai_vtuber()
+chat()
