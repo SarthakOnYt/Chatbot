@@ -10,4 +10,4 @@ This repository is being worked on currently and hence updates will be provided
 
 ## Reporting a Vulnerability
 
-Currently Reporting vunerablities is not open
+To report an issue , please contact SarthakOnYT
